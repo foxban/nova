@@ -278,7 +278,7 @@ class LibvirtDriver(driver.ComputeDriver):
             self._disk_prefix = FLAGS.libvirt_disk_prefix
         else:
             self._disk_prefix = disk_prefix_map.get(FLAGS.libvirt_type, 'vd')
-        self.default_root_device = self._disk_prefix + 'a'
+        self.default_root_device = self._disk_prefix + 'a1'
         self.default_second_device = self._disk_prefix + 'b'
         self.default_third_device = self._disk_prefix + 'c'
         self.default_last_device = self._disk_prefix + 'z'
