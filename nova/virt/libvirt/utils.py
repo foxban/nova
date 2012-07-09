@@ -119,11 +119,11 @@ def create_lvm_image(vg, lv, size, sparse=False):
                           ' but free space on volume group is'
                           ' only %(free_space)db.') % locals())
 
-        cmd = ('lvcreate', '-L', '%db' % preallocated_space,
-                '--virtualsize', '%db' % size, '-n', lv, vg)
+        cmd = ('lvcreate', '-L', '%dk' % (preallocated_space/1024),
+                '--virtualsize', '%dk' % (size/1024), '-n', lv, vg)
     else:
         check_size(size)
-        cmd = ('lvcreate', '-L', '%db' % size, '-n', lv, vg)
+        cmd = ('lvcreate', '-L', '%dk' % (size/1024), '-n', lv, vg)
     execute(*cmd, run_as_root=True, attempts=3)
 
 
