@@ -576,6 +576,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self.clock = None
         self.os_type = None
         self.os_kernel = None
+        self.os_loader = None
         self.os_initrd = None
         self.os_cmdline = None
         self.os_root = None
@@ -604,6 +605,8 @@ class LibvirtConfigGuest(LibvirtConfigObject):
             os.append(self._text_node("init", self.os_init_path))
         if self.os_boot_dev is not None:
             os.append(etree.Element("boot", dev=self.os_boot_dev))
+        if self.os_loader is not None:
+            os.append(self._text_node("loader", self.os_loader))
         root.append(os)
 
     def _format_features(self, root):

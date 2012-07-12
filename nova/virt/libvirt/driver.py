@@ -1509,6 +1509,11 @@ class LibvirtDriver(driver.ComputeDriver):
         root_device_name = driver.block_device_info_get_root(block_device_info)
         if root_device_name:
             root_device = block_device.strip_dev(root_device_name)
+        elif image_meta and image_meta['properties'] and image_meta['properties']['os_type'] == 'win':
+            root_device = "hda"
+            db.instance_update(
+                nova_context.get_admin_context(), instance['uuid'],
+                {'root_device_name': '/dev/' + 'hda'})
         else:
             # NOTE(yamahata):
             # for nova.api.ec2.cloud.CloudController.get_metadata()
@@ -1526,7 +1531,10 @@ class LibvirtDriver(driver.ComputeDriver):
             guest.os_kernel = "/usr/bin/linux"
             guest.os_root = root_device_name or "/dev/ubda"
         else:
-            if FLAGS.libvirt_type == "xen":
+            if image_meta and image_meta['properties'] and image_meta['properties']['os_type'] == 'win':
+                guest.os_type = "hvm"
+                guest.os_loader = "/usr/lib/xen/boot/hvmloader"
+            elif FLAGS.libvirt_type == "xen":
                 guest.os_type = "linux"
                 guest.os_root = root_device_name or "/dev/xvda"
             else:
