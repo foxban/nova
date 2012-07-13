@@ -20,8 +20,8 @@ from nova.api.openstack.compute.contrib import volumes
 from nova import context
 from nova import exception
 from nova import flags
-from nova import log as logging
 from nova.openstack.common import jsonutils
+from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 from nova import test
 from nova.tests.api.openstack import fakes
@@ -90,8 +90,6 @@ def stub_snapshot_get_all(self, context):
 class SnapshotApiTest(test.TestCase):
     def setUp(self):
         super(SnapshotApiTest, self).setUp()
-        fakes.FakeAuthManager.reset_fake_data()
-        fakes.FakeAuthDatabase.data = {}
         fakes.stub_out_networking(self.stubs)
         fakes.stub_out_rate_limiting(self.stubs)
         self.stubs.Set(volume.api.API, "create_snapshot", stub_snapshot_create)

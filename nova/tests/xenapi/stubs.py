@@ -15,11 +15,14 @@
 
 """Stubouts, mocks and fixtures for the test suite"""
 
+import contextlib
 import random
+import sys
 
 from nova.openstack.common import jsonutils
+from nova import test
 import nova.tests.image.fake
-from nova.virt.xenapi import connection as xenapi_conn
+from nova.virt.xenapi import driver as xenapi_conn
 from nova.virt.xenapi import fake
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import vmops
@@ -51,17 +54,9 @@ def stubout_instance_snapshot(stubs):
 
 
 def stubout_session(stubs, cls, product_version=(5, 6, 2), **opt_args):
-    """Stubs out three methods from XenAPISession"""
-    def fake_import(self):
-        """Stubs out get_imported_xenapi of XenAPISession"""
-        fake_module = 'nova.virt.xenapi.fake'
-        from_list = ['fake']
-        return __import__(fake_module, globals(), locals(), from_list, -1)
-
+    """Stubs out methods from XenAPISession"""
     stubs.Set(xenapi_conn.XenAPISession, '_create_session',
               lambda s, url: cls(url, **opt_args))
-    stubs.Set(xenapi_conn.XenAPISession, 'get_imported_xenapi',
-              fake_import)
     stubs.Set(xenapi_conn.XenAPISession, '_get_product_version',
               lambda s: product_version)
 
@@ -217,12 +212,6 @@ class FakeSessionForVMTests(fake.SessionBase):
         template_vbd_ref = fake.create_vbd(template_vm_ref, template_vdi_ref)
         return template_vm_ref
 
-    def VDI_destroy(self, session_ref, vdi_ref):
-        fake.destroy_vdi(vdi_ref)
-
-    def VM_destroy(self, session_ref, vm_ref):
-        fake.destroy_vm(vm_ref)
-
     def SR_scan(self, session_ref, sr_ref):
         pass
 
@@ -329,8 +318,9 @@ class FakeSessionForVolumeFailedTests(FakeSessionForVolumeTests):
 
 
 def stub_out_migration_methods(stubs):
-    def fake_create_snapshot(self, instance):
-        return 'vm_ref', dict(image='foo', snap='bar')
+    @contextlib.contextmanager
+    def fake_snapshot_attached_here(session, instance, vm_ref, label):
+        yield dict(image='foo', snap='bar')
 
     def fake_move_disks(self, instance, disk_info):
         vdi_ref = fake.create_vdi(instance['name'], 'fake')
@@ -358,8 +348,27 @@ def stub_out_migration_methods(stubs):
     stubs.Set(vmops.VMOps, '_destroy', fake_destroy)
     stubs.Set(vmops.VMOps, '_move_disks', fake_move_disks)
     stubs.Set(vm_utils, 'scan_default_sr', fake_sr)
-    stubs.Set(vm_utils, 'scan_sr', fake_sr)
-    stubs.Set(vmops.VMOps, '_create_snapshot', fake_create_snapshot)
+    stubs.Set(vm_utils, '_scan_sr', fake_sr)
+    stubs.Set(vm_utils, 'snapshot_attached_here', fake_snapshot_attached_here)
     stubs.Set(vm_utils, 'get_vdi_for_vm_safely', fake_get_vdi)
     stubs.Set(vm_utils, 'get_sr_path', fake_get_sr_path)
     stubs.Set(vm_utils, 'generate_ephemeral', fake_generate_ephemeral)
+
+
+class XenAPITestBase(test.TestCase):
+    def setUp(self):
+        super(XenAPITestBase, self).setUp()
+
+        self.orig_XenAPI = sys.modules.get('XenAPI')
+        sys.modules['XenAPI'] = fake
+
+        fake.reset()
+
+    def tearDown(self):
+        if self.orig_XenAPI is not None:
+            sys.modules['XenAPI'] = self.orig_XenAPI
+            self.orig_XenAPI = None
+        else:
+            sys.modules.pop('XenAPI')
+
+        super(XenAPITestBase, self).tearDown()
