@@ -5,6 +5,7 @@
 # All Rights Reserved.
 # Copyright (c) 2010 Citrix Systems, Inc.
 # Copyright (c) 2011 Piston Cloud Computing, Inc
+# Copyright (c) 2012 University Of Minho
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -61,11 +62,11 @@ from nova import db
 from nova import exception
 from nova import flags
 from nova.image import glance
-from nova import log as logging
 from nova.openstack.common import cfg
 from nova.openstack.common import excutils
 from nova.openstack.common import importutils
 from nova.openstack.common import jsonutils
+from nova.openstack.common import log as logging
 from nova import utils
 from nova.virt.disk import api as disk
 from nova.virt import driver
@@ -168,14 +169,20 @@ libvirt_opts = [
     cfg.StrOpt('libvirt_cpu_mode',
                default=None,
                help='Set to "host-model" to clone the host CPU feature flags; '
-                    'to "host-passthrough" to use the host CPU model '
-                    'exactly; or to "custom" to use a named CPU model. Only '
-                    'has effect if libvirt_type="kvm|qemu"'),
+                    'to "host-passthrough" to use the host CPU model exactly; '
+                    'to "custom" to use a named CPU model; '
+                    'to "none" to not set any CPU model. '
+                    'If libvirt_type="kvm|qemu", it will default to '
+                    '"host-model", otherwise it will default to "none"'),
     cfg.StrOpt('libvirt_cpu_model',
                default=None,
                help='Set to a named libvirt CPU model (see names listed '
                     'in /usr/share/libvirt/cpu_map.xml). Only has effect if '
                     'libvirt_cpu_mode="custom" and libvirt_type="kvm|qemu"'),
+    cfg.StrOpt('libvirt_snapshots_directory',
+               default='$instances_path/snapshots',
+               help='Location where libvirt driver will store snapshots '
+                    'before uploading them to image service'),
     ]
 
 FLAGS = flags.FLAGS
@@ -231,6 +238,9 @@ LIBVIRT_POWER_STATE = {
 }
 
 MIN_LIBVIRT_VERSION = (0, 9, 6)
+# When the above version matches/exceeds this version
+# delete it & corresponding code using it
+MIN_LIBVIRT_HOST_CPU_VERSION = (0, 9, 10)
 
 
 def _late_load_cheetah():
@@ -390,9 +400,15 @@ class LibvirtDriver(driver.ComputeDriver):
         except libvirt.libvirtError:
             return False
 
+    # TODO(Shrews): Remove when libvirt Bugzilla bug # 836647 is fixed.
+    def list_instance_ids(self):
+        if self._conn.numOfDomains() == 0:
+            return []
+        return self._conn.listDomainsID()
+
     def list_instances(self):
         return [self._conn.lookupByID(x).name()
-                for x in self._conn.listDomainsID()
+                for x in self.list_instance_ids()
                 if x != 0]  # We skip domains with ID 0 (hypervisors).
 
     @staticmethod
@@ -415,7 +431,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def list_instances_detail(self):
         infos = []
-        for domain_id in self._conn.listDomainsID():
+        for domain_id in self.list_instance_ids():
             domain = self._conn.lookupByID(domain_id)
             info = self._map_to_instance_info(domain)
             infos.append(info)
@@ -616,6 +632,13 @@ class LibvirtDriver(driver.ComputeDriver):
                         raise exception.DeviceIsBusy(device=mount_device)
                 raise
 
+        # TODO(danms) once libvirt has support for LXC hotplug,
+        # replace this re-define with use of the
+        # VIR_DOMAIN_AFFECT_LIVE & VIR_DOMAIN_AFFECT_CONFIG flags with
+        # attachDevice()
+        domxml = virt_dom.XMLDesc(libvirt.VIR_DOMAIN_XML_SECURE)
+        self._conn.defineXML(domxml)
+
     @staticmethod
     def _get_disk_xml(xml, device):
         """Returns the xml for the disk mounted at device"""
@@ -649,6 +672,13 @@ class LibvirtDriver(driver.ComputeDriver):
             self.volume_driver_method('disconnect_volume',
                                       connection_info,
                                       mount_device)
+
+        # TODO(danms) once libvirt has support for LXC hotplug,
+        # replace this re-define with use of the
+        # VIR_DOMAIN_AFFECT_LIVE & VIR_DOMAIN_AFFECT_CONFIG flags with
+        # detachDevice()
+        domxml = virt_dom.XMLDesc(libvirt.VIR_DOMAIN_XML_SECURE)
+        self._conn.defineXML(domxml)
 
     @exception.wrap_exception()
     def _attach_lxc_volume(self, xml, virt_dom, instance_name):
@@ -771,7 +801,9 @@ class LibvirtDriver(driver.ComputeDriver):
         libvirt_utils.create_snapshot(disk_path, snapshot_name)
 
         # Export the snapshot to a raw image
-        with utils.tempdir() as tmpdir:
+        snapshot_directory = FLAGS.libvirt_snapshots_directory
+        libvirt_utils.ensure_tree(snapshot_directory)
+        with utils.tempdir(dir=snapshot_directory) as tmpdir:
             try:
                 out_path = os.path.join(tmpdir, snapshot_name)
                 libvirt_utils.extract_snapshot(disk_path, source_format,
@@ -814,7 +846,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         :returns: True if the reboot succeeded
         """
-        dom = self._lookup_by_name(instance.name)
+        dom = self._lookup_by_name(instance["name"])
         (state, _max_mem, _mem, _cpus, _t) = dom.info()
         state = LIBVIRT_POWER_STATE[state]
         # NOTE(vish): This check allows us to reboot an instance that
@@ -1030,12 +1062,6 @@ class LibvirtDriver(driver.ComputeDriver):
         fp = open(fpath, 'a+')
         fp.write(data)
         return fpath
-
-    def _inject_files(self, instance, files, partition):
-        disk_path = self.image_backend.image(instance['name'],
-                                             'disk').path
-        disk.inject_files(disk_path, files, partition=partition,
-                          use_cow=FLAGS.use_cow_images)
 
     @exception.wrap_exception()
     def get_console_output(self, instance):
@@ -1259,10 +1285,10 @@ class LibvirtDriver(driver.ComputeDriver):
             swap_device = self.default_third_device
             fn = functools.partial(self._create_ephemeral,
                                    fs_label='ephemeral0',
-                                   os_type=instance.os_type)
+                                   os_type=instance["os_type"])
             fname = "ephemeral_%s_%s_%s" % ("0",
                                             ephemeral_gb,
-                                            instance.os_type)
+                                            instance["os_type"])
             size = ephemeral_gb * 1024 * 1024 * 1024
             image('disk.local').cache(fn=fn,
                                       fname=fname,
@@ -1274,11 +1300,11 @@ class LibvirtDriver(driver.ComputeDriver):
         for eph in driver.block_device_info_get_ephemerals(block_device_info):
             fn = functools.partial(self._create_ephemeral,
                                    fs_label='ephemeral%d' % eph['num'],
-                                   os_type=instance.os_type)
+                                   os_type=instance["os_type"])
             size = eph['size'] * 1024 * 1024 * 1024
             fname = "ephemeral_%s_%s_%s" % (eph['num'],
                                             eph['size'],
-                                            instance.os_type)
+                                            instance["os_type"])
             image(_get_eph_disk(eph)).cache(fn=fn,
                                             fname=fname,
                                             size=size,
@@ -1369,11 +1395,13 @@ class LibvirtDriver(driver.ComputeDriver):
         metadata = instance.get('metadata')
 
         if FLAGS.libvirt_inject_password:
-            admin_password = instance.get('admin_pass')
+            admin_pass = instance.get('admin_pass')
         else:
-            admin_password = None
+            admin_pass = None
 
-        if any((key, net, metadata, admin_password)):
+        files = instance.get('injected_files')
+
+        if any((key, net, metadata, admin_pass, files)):
             if config_drive:  # Should be True or None by now.
                 injection_path = raw('disk.config').path
                 img_id = 'config-drive'
@@ -1381,13 +1409,13 @@ class LibvirtDriver(driver.ComputeDriver):
                 injection_path = image('disk').path
                 img_id = instance.image_ref
 
-            for injection in ('metadata', 'key', 'net', 'admin_password'):
+            for injection in ('metadata', 'key', 'net', 'admin_pass', 'files'):
                 if locals()[injection]:
                     LOG.info(_('Injecting %(injection)s into image'
                                ' %(img_id)s'), locals(), instance=instance)
             try:
                 disk.inject_data(injection_path,
-                                 key, net, metadata, admin_password,
+                                 key, net, metadata, admin_pass, files,
                                  partition=target_partition,
                                  use_cow=FLAGS.use_cow_images)
 
@@ -1404,11 +1432,6 @@ class LibvirtDriver(driver.ComputeDriver):
 
         if FLAGS.libvirt_type == 'uml':
             libvirt_utils.chown(basepath('disk'), 'root')
-
-        files_to_inject = instance.get('injected_files')
-        if files_to_inject:
-            self._inject_files(instance, files_to_inject,
-                               partition=target_partition)
 
     @staticmethod
     def _volume_in_mapping(mount_device, block_device_info):
@@ -1449,11 +1472,38 @@ class LibvirtDriver(driver.ComputeDriver):
         caps.parse_str(xmlstr)
         return caps
 
+    def get_host_cpu_for_guest(self):
+        """Returns an instance of config.LibvirtConfigGuestCPU
+           representing the host's CPU model & topology with
+           policy for configuring a guest to match"""
+
+        caps = self.get_host_capabilities()
+        hostcpu = caps.host.cpu
+        guestcpu = config.LibvirtConfigGuestCPU()
+
+        guestcpu.model = hostcpu.model
+        guestcpu.vendor = hostcpu.vendor
+        guestcpu.arch = hostcpu.arch
+
+        guestcpu.match = "exact"
+
+        for hostfeat in hostcpu.features:
+            guestfeat = config.LibvirtConfigGuestCPUFeature(hostfeat.name)
+            guestfeat.policy = "require"
+
+        return guestcpu
+
     def get_guest_cpu_config(self):
         mode = FLAGS.libvirt_cpu_mode
         model = FLAGS.libvirt_cpu_model
 
         if mode is None:
+            if FLAGS.libvirt_type == "kvm" or FLAGS.libvirt_type == "qemu":
+                mode = "host-model"
+            else:
+                mode = "none"
+
+        if mode == "none":
             return None
 
         if FLAGS.libvirt_type != "kvm" and FLAGS.libvirt_type != "qemu":
@@ -1474,9 +1524,22 @@ class LibvirtDriver(driver.ComputeDriver):
         LOG.debug(_("CPU mode '%(mode)s' model '%(model)s' was chosen")
                   % {'mode': mode, 'model': (model or "")})
 
-        cpu = config.LibvirtConfigGuestCPU()
-        cpu.mode = mode
-        cpu.model = model
+        # TODO(berrange): in the future, when MIN_LIBVIRT_VERSION is
+        # updated to be at least this new, we can kill off the elif
+        # blocks here
+        if self.has_min_version(MIN_LIBVIRT_HOST_CPU_VERSION):
+            cpu = config.LibvirtConfigGuestCPU()
+            cpu.mode = mode
+            cpu.model = model
+        elif mode == "custom":
+            cpu = config.LibvirtConfigGuestCPU()
+            cpu.model = model
+        elif mode == "host-model":
+            cpu = self.get_host_cpu_for_guest()
+        elif mode == "host-passthrough":
+            msg = _("Passthrough of the host CPU was requested but "
+                    "this libvirt version does not support this feature")
+            raise exception.NovaException(msg)
 
         return cpu
 
@@ -1824,7 +1887,7 @@ class LibvirtDriver(driver.ComputeDriver):
         Return all block devices in use on this node.
         """
         devices = []
-        for dom_id in self._conn.listDomainsID():
+        for dom_id in self.list_instance_ids():
             domain = self._conn.lookupByID(dom_id)
             try:
                 doc = etree.fromstring(domain.XMLDesc(0))
@@ -1938,7 +2001,7 @@ class LibvirtDriver(driver.ComputeDriver):
         """
 
         total = 0
-        for dom_id in self._conn.listDomainsID():
+        for dom_id in self.list_instance_ids():
             dom = self._conn.lookupByID(dom_id)
             vcpus = dom.vcpus()
             if vcpus is None:
@@ -1965,7 +2028,7 @@ class LibvirtDriver(driver.ComputeDriver):
         idx3 = m.index('Cached:')
         if FLAGS.libvirt_type == 'xen':
             used = 0
-            for domain_id in self._conn.listDomainsID():
+            for domain_id in self.list_instance_ids():
                 # skip dom0
                 dom_mem = int(self._conn.lookupByID(domain_id).info()[2])
                 if domain_id != 0:
@@ -2227,7 +2290,7 @@ class LibvirtDriver(driver.ComputeDriver):
             timeout_count.pop()
             if len(timeout_count) == 0:
                 msg = _('Timeout migrating for %s. nwfilter not found.')
-                raise exception.NovaException(msg % instance_ref.name)
+                raise exception.NovaException(msg % instance_ref["name"])
             time.sleep(1)
 
     def live_migration(self, ctxt, instance_ref, dest,
@@ -2280,7 +2343,7 @@ class LibvirtDriver(driver.ComputeDriver):
             flagvals = [getattr(libvirt, x.strip()) for x in flaglist]
             logical_sum = reduce(lambda x, y: x | y, flagvals)
 
-            dom = self._conn.lookupByName(instance_ref.name)
+            dom = self._conn.lookupByName(instance_ref["name"])
             dom.migrateToURI(FLAGS.live_migration_uri % dest,
                              logical_sum,
                              None,
@@ -2395,9 +2458,9 @@ class LibvirtDriver(driver.ComputeDriver):
         """
         # Define migrated instance, otherwise, suspend/destroy does not work.
         dom_list = self._conn.listDefinedDomains()
-        if instance_ref.name not in dom_list:
+        if instance_ref["name"] not in dom_list:
             instance_dir = os.path.join(FLAGS.instances_path,
-                                        instance_ref.name)
+                                        instance_ref["name"])
             xml_path = os.path.join(instance_dir, 'libvirt.xml')
             # In case of block migration, destination does not have
             # libvirt.xml
@@ -2409,7 +2472,7 @@ class LibvirtDriver(driver.ComputeDriver):
             # libvirt.xml should be made by to_xml(), but libvirt
             # does not accept to_xml() result, since uuid is not
             # included in to_xml() result.
-            dom = self._lookup_by_name(instance_ref.name)
+            dom = self._lookup_by_name(instance_ref["name"])
             self._conn.defineXML(dom.XMLDesc(0))
 
     def get_instance_disk_info(self, instance_name):
@@ -2664,6 +2727,80 @@ class LibvirtDriver(driver.ComputeDriver):
     def confirm_migration(self, migration, instance, network_info):
         """Confirms a resize, destroying the source VM"""
         self._cleanup_resize(instance)
+
+    def get_diagnostics(self, instance):
+        def get_io_devices(xml_doc):
+            """ get the list of io devices from the
+            xml document."""
+            result = {"volumes": [], "ifaces": []}
+            try:
+                doc = etree.fromstring(xml_doc)
+            except Exception:
+                return result
+            blocks = [('./devices/disk', 'volumes'),
+                ('./devices/interface', 'ifaces')]
+            for block, key in blocks:
+                section = doc.findall(block)
+                for node in section:
+                    for child in node.getchildren():
+                        if child.tag == 'target' and child.get('dev'):
+                            result[key].append(child.get('dev'))
+            return result
+
+        domain = self._lookup_by_name(instance['name'])
+        output = {}
+        # get cpu time, might launch an exception if the method
+        # is not supported by the underlying hypervisor being
+        # used by libvirt
+        try:
+            cputime = domain.vcpus()[0]
+            for i in range(len(cputime)):
+                output["cpu" + str(i) + "_time"] = cputime[i][2]
+        except libvirt.libvirtError:
+            pass
+        # get io status
+        xml = domain.XMLDesc(0)
+        dom_io = get_io_devices(xml)
+        for disk in dom_io["volumes"]:
+            try:
+                # blockStats might launch an exception if the method
+                # is not supported by the underlying hypervisor being
+                # used by libvirt
+                stats = domain.blockStats(disk)
+                output[disk + "_read_req"] = stats[0]
+                output[disk + "_read"] = stats[1]
+                output[disk + "_write_req"] = stats[2]
+                output[disk + "_write"] = stats[3]
+                output[disk + "_errors"] = stats[4]
+            except libvirt.libvirtError:
+                pass
+        for interface in dom_io["ifaces"]:
+            try:
+                # interfaceStats might launch an exception if the method
+                # is not supported by the underlying hypervisor being
+                # used by libvirt
+                stats = domain.interfaceStats(interface)
+                output[interface + "_rx"] = stats[0]
+                output[interface + "_rx_packets"] = stats[1]
+                output[interface + "_rx_errors"] = stats[2]
+                output[interface + "_rx_drop"] = stats[3]
+                output[interface + "_tx"] = stats[4]
+                output[interface + "_tx_packets"] = stats[5]
+                output[interface + "_tx_errors"] = stats[6]
+                output[interface + "_tx_drop"] = stats[7]
+            except libvirt.libvirtError:
+                pass
+        output["memory"] = domain.maxMemory()
+        # memoryStats might launch an exception if the method
+        # is not supported by the underlying hypervisor being
+        # used by libvirt
+        try:
+            mem = domain.memoryStats()
+            for key in mem.keys():
+                output["memory-" + key] = mem[key]
+        except libvirt.libvirtError:
+            pass
+        return output
 
 
 class HostState(object):

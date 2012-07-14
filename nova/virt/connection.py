@@ -24,8 +24,8 @@ import sys
 from nova.common import deprecated
 from nova import exception
 from nova import flags
-from nova import log as logging
 from nova.openstack.common import importutils
+from nova.openstack.common import log as logging
 from nova import utils
 from nova.virt import driver
 
@@ -33,11 +33,11 @@ LOG = logging.getLogger(__name__)
 FLAGS = flags.FLAGS
 
 known_drivers = {
-    'baremetal': 'nova.virt.baremetal.proxy.ProxyConnection',
-    'fake': 'nova.virt.fake.FakeDriver',
-    'libvirt': 'nova.virt.libvirt.LibvirtDriver',
-    'vmwareapi': 'nova.virt.vmwareapi_conn.VMWareESXDriver',
-    'xenapi': 'nova.virt.xenapi.connection.XenAPIDriver'
+    'baremetal': 'baremetal.BareMetalDriver',
+    'fake': 'fake.FakeDriver',
+    'libvirt': 'libvirt.LibvirtDriver',
+    'vmwareapi': 'vmwareapi.VMWareESXDriver',
+    'xenapi': 'xenapi.XenAPIDriver'
     }
 
 
@@ -75,7 +75,8 @@ def get_connection(read_only=False):
     if driver_name is None:
         raise exception.VirtDriverNotFound(name=FLAGS.connection_type)
 
-    conn = importutils.import_object(driver_name, read_only=read_only)
+    conn = importutils.import_object_ns('nova.virt', driver_name,
+                                        read_only=read_only)
 
     if conn is None:
         LOG.error(_('Failed to open connection to underlying virt platform'))
