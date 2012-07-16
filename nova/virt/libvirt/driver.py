@@ -1572,13 +1572,11 @@ class LibvirtDriver(driver.ComputeDriver):
         root_device_name = driver.block_device_info_get_root(block_device_info)
         if root_device_name:
             root_device = block_device.strip_dev(root_device_name)
-        elif ( image_meta and 'properties' in image_meta ):
-            if 'vm_mode' in image_meta['properties']:
-                if image_meta['properties']['vm_mode'] == 'hvm':
-                    root_device = "hda"
-                    db.instance_update(
-                        nova_context.get_admin_context(), instance['uuid'],
-                        {'root_device_name': '/dev/' + 'hda'})
+        elif ( image_meta and 'properties' in image_meta ) and 'vm_mode' in image_meta['properties'] and image_meta['properties']['vm_mode'] == 'hvm':
+            root_device = "hda"
+            db.instance_update(
+                nova_context.get_admin_context(), instance['uuid'],
+                {'root_device_name': '/dev/' + 'hda'})
         else:
             # NOTE(yamahata):
             # for nova.api.ec2.cloud.CloudController.get_metadata()
@@ -1597,11 +1595,9 @@ class LibvirtDriver(driver.ComputeDriver):
             guest.os_root = root_device_name or "/dev/ubda"
         else:
             if FLAGS.libvirt_type == "xen":
-                if ( image_meta and 'properties' in image_meta ):
-                    if 'vm_mode' in image_meta['properties']:
-                        if image_meta['properties']['vm_mode'] == 'hvm':
-                            guest.os_type = "hvm"
-                            guest.os_loader = "/usr/lib/xen/boot/hvmloader"
+                if ( image_meta and 'properties' in image_meta ) and 'vm_mode' in image_meta['properties'] and image_meta['properties']['vm_mode'] == 'hvm':
+                    guest.os_type = "hvm"
+                    guest.os_loader = "/usr/lib/xen/boot/hvmloader"
                 else:
                     guest.os_type = "linux"
                     guest.os_root = root_device_name or "/dev/xvda"
